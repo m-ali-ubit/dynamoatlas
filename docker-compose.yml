@@ -1,0 +1,36 @@
+services:
+
+  dynamoatlas:
+    image: usermalikhan/dynamoatlas:latest
+    container_name: dynamoatlas
+    ports:
+      - "8000:8000"                        # eu-central-1
+      - "8001:8001"                        # us-east-1
+      - "8099:8099"                        # health endpoint
+    environment:
+      - REGIONS=eu-central-1:8000,us-east-1:8001
+      - GLOBAL_TABLES=Projects,Users
+      - CFN_PARAMETERS=AppEnv=local        # passed to cfddb --parameters
+      # ── Optional ──────────────────────────────────────────────────────
+      # - SCHEMA_PATH=/schema/dynamodb.yaml     (default)
+      # - REPLICATION_MODE=latest               (latest | full)
+      # - POLL_INTERVAL=1                       (seconds)
+      # - LAG_WARN_SECONDS=10                   (warn if replication lag exceeds this)
+      # - SHARD_REFRESH_SECONDS=30              (how often to check for new shards)
+      # - HEALTH_PORT=8099                      (default)
+    volumes:
+      - ./resources/dynamodb/dynamodb.yaml:/schema/dynamodb.yaml
+      - dynamoatlas_data:/data
+    # The HEALTHCHECK is baked into the image itself.
+    # This condition means any service that depends_on dynamoatlas
+    # will wait until /health returns {"status":"ready"} before starting.
+
+  # ── Example: your app service waiting for DynamoAtlas to be ready ──────
+  # your-app:
+  #   image: your-app:latest
+  #   depends_on:
+  #     dynamoatlas:
+  #       condition: service_healthy     # waits for /health → ready
+
+volumes:
+  dynamoatlas_data:
