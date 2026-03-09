@@ -1,6 +1,7 @@
 services:
 
   dynamoatlas:
+    build: .
     image: usermalikhan/dynamoatlas:latest
     container_name: dynamoatlas
     ports:
