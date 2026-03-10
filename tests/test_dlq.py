@@ -20,6 +20,7 @@ def test_replay_insert(ddb_client, tmp_path):
         },
     }
     import dlq_replay
+
     original_make_client = dlq_replay.make_ddb_client
     dlq_replay.make_ddb_client = lambda port: ddb_client
     try:
@@ -53,6 +54,7 @@ def test_replay_remove(ddb_client):
         },
     }
     import dlq_replay
+
     original_make_client = dlq_replay.make_ddb_client
     dlq_replay.make_ddb_client = lambda port: ddb_client
     try:

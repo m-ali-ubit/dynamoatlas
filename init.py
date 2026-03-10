@@ -57,9 +57,10 @@ DLQ_DIR = Path(os.environ.get("DLQ_DIR", "/tmp/dlq"))
 
 WAIT_RETRIES = 100
 WAIT_SLEEP = 0.5
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 REPL_SENTINEL_ATTR = "__dynamoatlas_repl__"
 
+_processes = []
 deserializer = TypeDeserializer()
 serializer = TypeSerializer()
 
@@ -266,6 +267,7 @@ def parse_tables() -> list[str]:
 
 def start_instances(region_entries: list):
     """Start DynamoDB Local instances as background processes."""
+    global _processes
     db_dir = Path("/dynamodb")
     jar_path = db_dir / "DynamoDBLocal.jar"
     lib_path = db_dir / "DynamoDBLocal_lib"
@@ -273,7 +275,7 @@ def start_instances(region_entries: list):
     for region, port in region_entries:
         region_db_dir = Path(f"/data/db_{region}")
         region_db_dir.mkdir(parents=True, exist_ok=True)
-        
+
         cmd = [
             "java",
             f"-Djava.library.path={lib_path}",
@@ -285,14 +287,17 @@ def start_instances(region_entries: list):
             "-port",
             port,
         ]
-        log.info(f"Starting DynamoDB Local for {region} on :{port} (Path: {region_db_dir})")
+        log.info(
+            f"Starting DynamoDB Local for {region} on :{port} (Path: {region_db_dir})"
+        )
         # Start as background process. We don't wait for completion here.
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd="/dynamodb",
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        _processes.append(proc)
 
 
 def wait_for_instance(region: str, port: str):
@@ -388,6 +393,28 @@ def init_region(
         raise
 
 
+def handle_shutdown(signum, frame):
+    """Gracefully terminate all tracked subprocesses."""
+    log.info(f"Shutdown signal ({signum}) received. Cleaning up.")
+    for proc in _processes:
+        try:
+            log.info(f"Terminating DynamoDB Local (PID: {proc.pid})")
+            proc.terminate()
+        except Exception as e:
+            log.warning(f"Error terminating process {proc.pid}: {e}")
+
+    # Wait a moment for processes to exit
+    for proc in _processes:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning(f"Process {proc.pid} did not exit cleanly, killing.")
+            proc.kill()
+
+    log.info("Cleanup complete. Exiting.")
+    sys.exit(0)
+
+
 def start_replicator():
     try:
         server = xmlrpc.client.ServerProxy("http://localhost:9001/RPC2")
@@ -399,6 +426,10 @@ def start_replicator():
 
 
 def main():
+    # Register shutdown handlers
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
     region_entries = parse_regions()
     global_tables = parse_tables()
 
@@ -453,7 +484,9 @@ def main():
         console = Console()
         console.print("╭────────────────────────────────────────────────────╮")
         console.print("│                DynamoAtlas is ready                │")
-        console.print(f"│   Health → http://localhost:{HEALTH_PORT}/health            │")
+        console.print(
+            f"│   Health → http://localhost:{HEALTH_PORT}/health            │"
+        )
         console.print("╰────────────────────────────────────────────────────╯")
 
         # Keep the process alive efficiently to provide the health/management API
