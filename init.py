@@ -22,6 +22,7 @@ import threading
 import time
 import xmlrpc.client
 import sys
+import signal
 import concurrent.futures
 from rich.console import Console
 from rich.table import Table
@@ -446,9 +447,13 @@ def main():
 
         console = Console()
         console.print("╭────────────────────────────────────────────────────╮")
-        console.print("│  ✓             DynamoAtlas is ready                │")
-        console.print(f"│   Health → http://localhost:{HEALTH_PORT}/health   │")
+        console.print("│                DynamoAtlas is ready                │")
+        console.print(f"│   Health → http://localhost:{HEALTH_PORT}/health            │")
         console.print("╰────────────────────────────────────────────────────╯")
+
+        # Keep the process alive efficiently to provide the health/management API
+        log.info("Management API (Health/DLQ) is persistent. Press Ctrl+C to stop.")
+        signal.pause()
 
     except Exception as e:
         log.error(f"Initialization failed: {e}")

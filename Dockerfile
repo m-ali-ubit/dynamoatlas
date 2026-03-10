@@ -26,7 +26,6 @@ HEALTHCHECK \
   --timeout=3s \
   --start-period=60s \
   --retries=3 \
-  CMD curl -sf http://localhost:8099/health | python3 -c \
-      "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d['status']=='ready' else 1)"
+  CMD curl -sf http://localhost:8099/health | grep -q '"status": "ready"' || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]
