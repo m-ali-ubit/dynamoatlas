@@ -22,6 +22,10 @@ import threading
 import time
 import xmlrpc.client
 import sys
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -33,12 +37,14 @@ logging.basicConfig(
     format="%(asctime)s [init] %(levelname)s %(message)s",
 )
 log = logging.getLogger(__name__)
+console = Console()
 
-try:
-    REGIONS = os.environ["REGIONS"]
-    GLOBAL_TABLES = os.environ["GLOBAL_TABLES"]
-except KeyError as e:
-    log.error(f"Missing required environment variable: {e}")
+
+REGIONS = os.environ.get("REGIONS", "")
+GLOBAL_TABLES = os.environ.get("GLOBAL_TABLES", "")
+
+if not REGIONS and __name__ == "__main__":
+    log.error("Missing required environment variable: REGIONS")
     sys.exit(1)
 
 SCHEMA_PATH = os.environ.get("SCHEMA_PATH", "/schema/dynamodb.yaml")
@@ -199,33 +205,37 @@ def start_health_server():
     log.info(f"Health server listening on :{HEALTH_PORT}/health")
 
 
-def print_banner(region_entries: list, global_tables: list):
-    width = 54
-    border = "─" * width
+def print_banner(region_entries, global_tables):
+    # Create the main header table
+    table = Table(show_header=False, box=None, padding=(0, 1))
 
-    def row(label, value):
-        line = f"{label:<18} {value}"
-        log.info(line)
-
-    log.info(f"╭{border}╮")
-    log.info(f"│{'DynamoAtlas':^{width}}│")
-    log.info(f"│{'Dynamodb Local Multi Region Emulator  v' + VERSION:^{width}}│")
-    log.info(f"├{border}┤")
-
+    # Add Region entries
     for region, port in region_entries:
-        row("Region", f"{region}  →  localhost:{port}")
+        table.add_row(
+            f"[bold cyan]Region[/bold cyan]", f"{region} [dim]→[/dim] localhost:{port}"
+        )
 
-    log.info(f"├{border}┤")
+    # Add Global tables
+    for table_name in global_tables:
+        table.add_row(f"[bold magenta]Global Table[/bold magenta]", table_name)
 
-    for table in global_tables:
-        row("Global Table", table)
+    # Add remaining config
+    table.add_row(f"[bold yellow]Schema[/bold yellow]", SCHEMA_PATH)
+    table.add_row(f"[bold yellow]Repl Mode[/bold yellow]", REPLICATION_MODE.upper())
+    table.add_row(
+        f"[bold green]Health[/bold green]", f"http://localhost:{HEALTH_PORT}/health"
+    )
 
-    log.info(f"├{border}┤")
-    row("Schema", SCHEMA_PATH)
-    row("CFN Params", CFN_PARAMETERS)
-    row("Repl Mode", REPLICATION_MODE.upper())
-    row("Health", f"http://localhost:{HEALTH_PORT}/health")
-    log.info(f"╰{border}╯")
+    # Wrap it all in a cool panel
+    panel = Panel(
+        table,
+        title="[bold blue]DynamoAtlas[/bold blue]",
+        subtitle=f"[dim]v{VERSION}[/dim]",
+        border_style="blue",
+        expand=False,
+    )
+
+    console.print(panel)
 
 
 def make_client(port: str):
@@ -255,6 +265,32 @@ def parse_regions() -> list[tuple[str, str]]:
 
 def parse_tables() -> list[str]:
     return [t.strip() for t in GLOBAL_TABLES.split(",") if t.strip()]
+
+
+def start_instances(region_entries: list):
+    """Start DynamoDB Local instances as background processes."""
+    db_dir = Path("/dynamodb")
+    jar_path = db_dir / "DynamoDBLocal.jar"
+    lib_path = db_dir / "DynamoDBLocal_lib"
+
+    for region, port in region_entries:
+        cmd = [
+            "java",
+            f"-Djava.library.path={lib_path}",
+            "-jar",
+            str(jar_path),
+            "-sharedDb",
+            "-port",
+            port,
+        ]
+        log.info(f"Starting DynamoDB Local for {region} on :{port}")
+        # Start as background process. We don't wait for completion here.
+        subprocess.Popen(
+            cmd,
+            cwd="/dynamodb",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def wait_for_instance(region: str, port: str):
@@ -343,6 +379,9 @@ def main():
     start_health_server()
 
     try:
+        log.info("[0/4] Starting DynamoDB Local instances.")
+        start_instances(region_entries)
+
         log.info("[1/4] Waiting for DynamoDB Local instances.")
         for region, port in region_entries:
             wait_for_instance(region, port)
@@ -354,27 +393,39 @@ def main():
         update_health_check("schema_deployed", True)
 
         log.info("[3/4] Enabling streams on global tables.")
+        valid_tables = []
         for region, port in region_entries:
             client = make_client(port)
+            existing_tables = set(client.list_tables()["TableNames"])
             for table in global_tables:
-                ensure_stream_enabled(client, region, table)
+                if table not in existing_tables:
+                    log.warning(
+                        f"Table '{table}' not found in region-port {region}:{port}. Skipping replication for this table."
+                    )
+                    continue
+
+                try:
+                    ensure_stream_enabled(client, region, table)
+                    if table not in valid_tables:
+                        valid_tables.append(table)
+                except Exception as e:
+                    log.error(f"Failed to enable stream for '{table}' ({region}): {e}")
+
+        # Update global list to only include tables that actually exist
+        global_tables[:] = valid_tables
+        _health_state["tables"] = global_tables
+
         update_health_check("streams_enabled", True)
 
         log.info("[4/4] Starting replicator")
         start_replicator()
         update_health_check("replicator_started", True)
-
-        # 8. Mark healthy
         set_health_ready()
-        log.info("╭────────────────────────────────────────────────────╮")
-        log.info("│  ✓             DynamoAtlas is ready                │")
-        log.info(f"│   Health → http://localhost:{HEALTH_PORT}/health   │")
-        log.info("╰────────────────────────────────────────────────────╯")
+        log.info("DynamoAtlas is ready")
 
     except Exception as e:
         log.error(f"Initialization failed: {e}")
         update_health_check("error", str(e))
-
         while True:
             time.sleep(60)
 

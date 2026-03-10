@@ -96,7 +96,7 @@ curl http://localhost:8099/health
 | Variable                | Required | Default                  | Description                                                                            |
 |-------------------------|----------|--------------------------|----------------------------------------------------------------------------------------|
 | `REGIONS`               | Yes      | —                        | Comma-separated `region:port` pairs. e.g. `eu-central-1:8000,us-east-1:8001`           |
-| `GLOBAL_TABLES`         | Yes      | —                        | Comma-separated table names to replicate. e.g. `Projects,Users`                        |
+| `GLOBAL_TABLES`         | No       | —                        | Comma-separated table names to replicate. e.g. `Projects,Users`                        |
 | `CFN_PARAMETERS`        | No       | `AppEnv=local`           | Passed to `cfddb --parameters`. Should match your existing setup command.              |
 | `SCHEMA_PATH`           | No       | `/schema/dynamodb.yaml`  | Path inside the container to your CloudFormation schema.                               |
 | `REPLICATION_MODE`      | No       | `latest`                 | `latest` — only new writes. `full` — replay all existing data on start (TRIM_HORIZON). |

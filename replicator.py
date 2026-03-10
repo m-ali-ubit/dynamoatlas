@@ -95,7 +95,7 @@ def parse_regions() -> list[list[str]]:
 
 
 def parse_tables() -> list[str]:
-    return [t.strip() for t in GLOBAL_TABLES.split(",")]
+    return [t.strip() for t in GLOBAL_TABLES.split(",") if t.strip()]
 
 
 def make_ddb_client(port: str):
@@ -369,6 +369,13 @@ def process_shard(
 
 
 def coordinator_loop(region_clients, global_tables):
+    if not global_tables:
+        log.info("No global tables configured. Coordinator idling.")
+        while not _shutdown.is_set():
+            time.sleep(5)
+        log.info("Coordinator stopped.")
+        return
+
     load_shard_state()
     tracked_shards = {}
     last_refresh = 0
@@ -470,26 +477,37 @@ def main():
     global_tables = parse_tables()
 
     clients = []
+    active_tables = set()
     for table in global_tables:
         for region, port in region_entries:
             endpoint = f"http://localhost:{port}"
             ddb = make_ddb_client(port)
-            # Pre-warm schema cache
-            fetch_table_schema(ddb, table, endpoint)
-            clients.append(
-                {
-                    "label": f"{region}:{port}",
-                    "endpoint": endpoint,
-                    "ddb": ddb,
-                    "streams": make_streams_client(port),
-                    "table": table,
-                    "stream_arn": get_stream_arn(ddb, table),
-                }
-            )
+            try:
+                # Pre-warm schema cache; this will fail if table doesn't exist
+                fetch_table_schema(ddb, table, endpoint)
+                stream_arn = get_stream_arn(ddb, table)
+
+                clients.append(
+                    {
+                        "label": f"{region}:{port}",
+                        "endpoint": endpoint,
+                        "ddb": ddb,
+                        "streams": make_streams_client(port),
+                        "table": table,
+                        "stream_arn": stream_arn,
+                    }
+                )
+                active_tables.add(table)
+            except Exception as e:
+                log.warning(f"Skipping table '{table}' in {region}:{port}: {e}")
+
+    # Only pass tables that were successfully initialized
+    filtered_global_tables = [t for t in global_tables if t in active_tables]
+
     log.info(
-        f"Initialized {len(clients)} regional table clients. Starting Coordinator."
+        f"Initialized {len(clients)} regional table clients for {len(filtered_global_tables)} tables. Starting Coordinator."
     )
-    coordinator_loop(clients, global_tables)
+    coordinator_loop(clients, filtered_global_tables)
 
 
 if __name__ == "__main__":

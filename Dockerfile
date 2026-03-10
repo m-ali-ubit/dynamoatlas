@@ -9,7 +9,7 @@ RUN dnf install -y --allowerasing python3.11 python3.11-pip shadow-utils curl ta
 
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3
 
-RUN python3 -m pip install boto3 cfddb supervisor pytest moto[dynamodb]
+RUN python3 -m pip install boto3 cfddb supervisor pytest moto[dynamodb] rich
 
 RUN mkdir -p /dynamodb && \
     curl -L "https://d1ni2b6xgvw0s0.cloudfront.net/v2.x/dynamodb_local_latest.tar.gz" \
