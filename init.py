@@ -22,6 +22,7 @@ import threading
 import time
 import xmlrpc.client
 import sys
+import concurrent.futures
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -53,9 +54,9 @@ HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8099"))
 REPLICATION_MODE = os.environ.get("REPLICATION_MODE", "latest")
 DLQ_DIR = Path(os.environ.get("DLQ_DIR", "/tmp/dlq"))
 
-WAIT_RETRIES = 40
-WAIT_SLEEP = 2
-VERSION = "1.2.0"
+WAIT_RETRIES = 100
+WAIT_SLEEP = 0.5
+VERSION = "0.3.0"
 REPL_SENTINEL_ATTR = "__dynamoatlas_repl__"
 
 deserializer = TypeDeserializer()
@@ -211,26 +212,21 @@ def print_banner(region_entries, global_tables):
 
     # Add Region entries
     for region, port in region_entries:
-        table.add_row(
-            f"[bold cyan]Region[/bold cyan]", f"{region} [dim]→[/dim] localhost:{port}"
-        )
+        table.add_row(f"Region", f"{region} --> localhost:{port}")
 
     # Add Global tables
     for table_name in global_tables:
-        table.add_row(f"[bold magenta]Global Table[/bold magenta]", table_name)
+        table.add_row(f"Global Table", table_name)
 
     # Add remaining config
-    table.add_row(f"[bold yellow]Schema[/bold yellow]", SCHEMA_PATH)
-    table.add_row(f"[bold yellow]Repl Mode[/bold yellow]", REPLICATION_MODE.upper())
-    table.add_row(
-        f"[bold green]Health[/bold green]", f"http://localhost:{HEALTH_PORT}/health"
-    )
+    table.add_row(f"Schema", SCHEMA_PATH)
+    table.add_row(f"Repl Mode", REPLICATION_MODE.upper())
 
     # Wrap it all in a cool panel
     panel = Panel(
         table,
-        title="[bold blue]DynamoAtlas[/bold blue]",
-        subtitle=f"[dim]v{VERSION}[/dim]",
+        title="DynamoAtlas",
+        subtitle=f"v{VERSION}",
         border_style="blue",
         expand=False,
     )
@@ -351,6 +347,41 @@ def ensure_stream_enabled(client, region: str, table_name: str):
     log.info(f"Stream enabled: '{table_name}' ({region})")
 
 
+def init_region(
+    region: str,
+    port: str,
+    global_tables: list,
+    valid_tables: list,
+    table_lock: threading.Lock,
+):
+    """Wait for instance, deploy schema, and enable streams for a single region."""
+    try:
+        log.info(f"Initializing region: {region} on :{port}")
+        wait_for_instance(region, port)
+
+        run_cfddb(region, port)
+
+        client = make_client(port)
+        existing_tables = set(client.list_tables()["TableNames"])
+
+        for table in global_tables:
+            if table not in existing_tables:
+                log.warning(f"Table '{table}' not found in {region}:{port}. Skipping.")
+                continue
+
+            try:
+                ensure_stream_enabled(client, region, table)
+                with table_lock:
+                    if table not in valid_tables:
+                        valid_tables.append(table)
+            except Exception as e:
+                log.error(f"Failed to enable stream for '{table}' ({region}): {e}")
+
+    except Exception as e:
+        log.error(f"Failed to initialize region {region}: {e}")
+        raise
+
+
 def start_replicator():
     try:
         server = xmlrpc.client.ServerProxy("http://localhost:9001/RPC2")
@@ -379,49 +410,45 @@ def main():
     start_health_server()
 
     try:
-        log.info("[0/4] Starting DynamoDB Local instances.")
+        log.info("[0/2] Starting DynamoDB Local instances.")
         start_instances(region_entries)
 
-        log.info("[1/4] Waiting for DynamoDB Local instances.")
-        for region, port in region_entries:
-            wait_for_instance(region, port)
-        update_health_check("instances_ready", True)
-
-        log.info("[2/4] Deploying schema via cfddb.")
-        for region, port in region_entries:
-            run_cfddb(region, port)
-        update_health_check("schema_deployed", True)
-
-        log.info("[3/4] Enabling streams on global tables.")
+        log.info("[1/2] Initializing regions in parallel (Wait + Schema + Streams).")
         valid_tables = []
-        for region, port in region_entries:
-            client = make_client(port)
-            existing_tables = set(client.list_tables()["TableNames"])
-            for table in global_tables:
-                if table not in existing_tables:
-                    log.warning(
-                        f"Table '{table}' not found in region-port {region}:{port}. Skipping replication for this table."
-                    )
-                    continue
+        table_lock = threading.Lock()
 
-                try:
-                    ensure_stream_enabled(client, region, table)
-                    if table not in valid_tables:
-                        valid_tables.append(table)
-                except Exception as e:
-                    log.error(f"Failed to enable stream for '{table}' ({region}): {e}")
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(region_entries)
+        ) as executor:
+            futures = [
+                executor.submit(
+                    init_region, region, port, global_tables, valid_tables, table_lock
+                )
+                for region, port in region_entries
+            ]
+            concurrent.futures.wait(futures)
+            # Check for exceptions
+            for future in futures:
+                if future.exception():
+                    raise future.exception()
 
-        # Update global list to only include tables that actually exist
+        # Update global list and health check
         global_tables[:] = valid_tables
         _health_state["tables"] = global_tables
-
+        update_health_check("instances_ready", True)
+        update_health_check("schema_deployed", True)
         update_health_check("streams_enabled", True)
 
-        log.info("[4/4] Starting replicator")
+        log.info("[2/2] Starting replicator")
         start_replicator()
         update_health_check("replicator_started", True)
         set_health_ready()
-        log.info("DynamoAtlas is ready")
+
+        console = Console()
+        console.print("╭────────────────────────────────────────────────────╮")
+        console.print("│  ✓             DynamoAtlas is ready                │")
+        console.print(f"│   Health → http://localhost:{HEALTH_PORT}/health   │")
+        console.print("╰────────────────────────────────────────────────────╯")
 
     except Exception as e:
         log.error(f"Initialization failed: {e}")
