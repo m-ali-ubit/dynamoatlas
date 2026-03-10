@@ -57,7 +57,7 @@ DLQ_DIR = Path(os.environ.get("DLQ_DIR", "/tmp/dlq"))
 
 WAIT_RETRIES = 100
 WAIT_SLEEP = 0.5
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 REPL_SENTINEL_ATTR = "__dynamoatlas_repl__"
 
 deserializer = TypeDeserializer()
@@ -271,16 +271,21 @@ def start_instances(region_entries: list):
     lib_path = db_dir / "DynamoDBLocal_lib"
 
     for region, port in region_entries:
+        region_db_dir = Path(f"/data/db_{region}")
+        region_db_dir.mkdir(parents=True, exist_ok=True)
+        
         cmd = [
             "java",
             f"-Djava.library.path={lib_path}",
             "-jar",
             str(jar_path),
             "-sharedDb",
+            "-dbPath",
+            str(region_db_dir),
             "-port",
             port,
         ]
-        log.info(f"Starting DynamoDB Local for {region} on :{port}")
+        log.info(f"Starting DynamoDB Local for {region} on :{port} (Path: {region_db_dir})")
         # Start as background process. We don't wait for completion here.
         subprocess.Popen(
             cmd,
